@@ -29,7 +29,7 @@ func (s *Session) scheduleWrite() {
 			return
 		}
 		s.mu.RUnlock()
-		s.WriteFiles()
+		_ = s.writeFilesErr()
 	})
 }
 
@@ -282,11 +282,10 @@ func critJSONIsEmpty(cj CritJSON) bool {
 //
 // Concurrency note: callers that need to guarantee the write is observable
 // before returning a path to a client (e.g. POST /api/finish) MUST use
-// SyncWriteFiles, which serializes against the debounce timer via writeMu
-// and surfaces write errors. Bare WriteFiles is for the timer callback and
-// best-effort flushes (focus change, shutdown).
+// SyncWriteFiles, which surfaces write errors. WriteFiles uses the same
+// serialization but preserves the best-effort API for existing callers.
 func (s *Session) WriteFiles() {
-	_ = s.writeFilesErr()
+	_ = s.SyncWriteFiles()
 }
 
 // SyncWriteFiles flushes pending state to disk synchronously, serialized
@@ -321,6 +320,17 @@ func (s *Session) writeFilesErr() error {
 		return nil
 	}
 
+	// Preserve the no-op for an empty session without creating a review folder.
+	if _, err := os.Stat(critPath); os.IsNotExist(err) && critJSONIsEmpty(buildCritJSON(s.snapshotForWrite(critPath))) {
+		return nil
+	}
+	return WithReviewWriteLock(critPath, func() error {
+		return s.writeReviewFile(critPath)
+	})
+}
+
+// Caller holds writeMu and the review-file transaction lock.
+func (s *Session) writeReviewFile(critPath string) error {
 	if s.handleExternalDeletion(critPath) {
 		return nil
 	}

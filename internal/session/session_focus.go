@@ -269,7 +269,7 @@ func (s *Session) SetFocus(f Focus) error {
 	// 200ms) live only in s.Files and would be lost when buildFilesForFocus
 	// returns a fresh slice with empty Comments. WriteFiles is idempotent
 	// when there's nothing pending.
-	s.WriteFiles()
+	_ = s.writeFilesErr()
 
 	// Snapshot for rollback.
 	s.mu.Lock()

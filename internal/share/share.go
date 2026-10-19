@@ -973,6 +973,12 @@ func MergeWebComments(critPath string, newComments []WebComment, replyUpdates ma
 // updateReviewFile loads the review file, applies mutate, stamps UpdatedAt,
 // and saves it.
 func updateReviewFile(critPath string, mutate func(*session.CritJSON)) error {
+	return session.WithReviewWriteLock(critPath, func() error {
+		return updateReviewFileLocked(critPath, mutate)
+	})
+}
+
+func updateReviewFileLocked(critPath string, mutate func(*session.CritJSON)) error {
 	data, err := session.ReadFileShared(session.ReviewPathsFor(critPath).Review)
 	if err != nil {
 		return err

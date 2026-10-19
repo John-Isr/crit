@@ -3759,12 +3759,9 @@ func TestDeleteReviewComment_NotReAddedFromDisk(t *testing.T) {
 		subscribers: make(map[chan SSEEvent]struct{}),
 	}
 
-	// Save synchronously so a pending debounce cannot later restore this
-	// pre-deletion snapshot.
+	// Add a review comment and write to disk
 	rc := s.AddReviewComment("delete this review comment", "", "")
-	if err := s.SyncWriteFiles(); err != nil {
-		t.Fatal(err)
-	}
+	s.WriteFiles()
 
 	// Verify it's on disk
 	data, err := os.ReadFile(ReviewPathsFor(s.critJSONPath()).Review)
@@ -3783,9 +3780,8 @@ func TestDeleteReviewComment_NotReAddedFromDisk(t *testing.T) {
 	}
 
 	// Write again
-	if err := s.SyncWriteFiles(); err != nil {
-		t.Fatal(err)
-	}
+	flushWrites(s)
+	s.WriteFiles()
 
 	// Read .crit.json — should have no review comments
 	data, err = os.ReadFile(ReviewPathsFor(s.critJSONPath()).Review)

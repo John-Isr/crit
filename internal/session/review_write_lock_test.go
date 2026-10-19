@@ -1,0 +1,78 @@
+package session
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestWithReviewWriteLockRejectsInvalidPaths(t *testing.T) {
+	t.Run("invalid identity", func(t *testing.T) {
+		err := WithReviewWriteLock(filepath.Join(t.TempDir(), "invalid\x00"), func() error {
+			t.Error("callback ran without a lock")
+			return nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "stat review identity") {
+			t.Fatalf("expected identity error, got %v", err)
+		}
+	})
+	t.Run("lock path is a directory", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, "review.lock"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		err := WithReviewWriteLock(dir, func() error {
+			t.Error("callback ran without a lock")
+			return nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "opening review lock") {
+			t.Fatalf("expected lock-file error, got %v", err)
+		}
+	})
+}
+
+func TestWithReviewWriteLockCannotCreateFolder(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires Unix permission enforcement")
+	}
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(parent, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
+	err := WithReviewWriteLock(filepath.Join(parent, "review"), func() error {
+		t.Error("callback ran without a lock")
+		return nil
+	})
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) || pathErr.Op != "mkdir" || !os.IsPermission(err) {
+		t.Fatalf("expected mkdir permission error, got %v", err)
+	}
+}
+
+func TestWithReviewWriteLockReleasesAfterCallbackError(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "new", "review")
+	want := errors.New("write failed")
+	if err := WithReviewWriteLock(dir, func() error { return want }); !errors.Is(err, want) {
+		t.Fatalf("callback error lost: got %v, want %v", err, want)
+	}
+	// Use another descriptor to verify that the failed transaction released its lock.
+	done := make(chan error, 1)
+	go func() { done <- WithReviewWriteLock(dir, func() error { return nil }) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("lock remained held after callback error")
+	}
+}

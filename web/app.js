@@ -840,6 +840,7 @@
       if (f.viewed) continue; // respect existing/restored viewed state
       if (globMatch.matchAny(f.path, patterns)) {
         f.viewed = true;
+        delete f.viewedHunks;
         f.collapsed = true;
       }
     }
@@ -847,12 +848,44 @@
     try { localStorage.setItem(autoViewedMarkerKey(), '1'); } catch {}
   }
 
+  function viewedHunkKeys(hunks) {
+    return (hunks || []).flatMap(storyRawHunks).map(function(hunk) {
+      // Ignore synthesized context and new-side line shifts when matching a refreshed diff.
+      const changes = JSON.stringify(hunk.Lines.filter(function(line) {
+        return line.Type !== 'context';
+      }).map(function(line) { return [line.Type, line.Content]; }));
+      let hash = 0;
+      for (let i = 0; i < changes.length; i++) hash = ((hash << 5) - hash + changes.charCodeAt(i)) | 0;
+      return hunk.OldStart + ':' + (hash >>> 0).toString(36);
+    });
+  }
+
+  function areHunksViewed(file, hunks) {
+    const keys = viewedHunkKeys(hunks);
+    return keys.length > 0 && keys.every(function(key) {
+      return file.viewedHunks ? file.viewedHunks.includes(key) : !!file.viewed;
+    });
+  }
+
+  function reconcileStoryViewed(file) {
+    // Only the full, unfiltered Story diff can determine whole-file completion.
+    if (file.lazy || storyHidden || !storyHasContent(session && session.story)) return;
+    const keys = viewedHunkKeys(file.diffHunks);
+    if (!file.viewedHunks && file.viewed) file.viewedHunks = keys;
+    if (!file.viewedHunks) return;
+    file.viewedHunks = file.viewedHunks.filter(function(key) { return keys.includes(key); });
+    file.viewed = areHunksViewed(file, file.diffHunks);
+  }
+
   function saveViewedState() {
     const viewed = {};
+    const hunks = {};
     for (let i = 0; i < files.length; i++) {
       if (files[i].viewed) viewed[files[i].path] = true;
+      if (files[i].viewedHunks) hunks[files[i].path] = files[i].viewedHunks;
     }
     try { localStorage.setItem(viewedStorageKey(), JSON.stringify(viewed)); } catch {}
+    try { localStorage.setItem('crit-viewed-hunks-' + viewedIdentityHash(), JSON.stringify(hunks)); } catch {}
   }
 
   function restoreViewedState() {
@@ -863,12 +896,20 @@
         if (files[i].viewed) files[i].collapsed = true;
       }
     } catch {}
+    try {
+      const data = JSON.parse(localStorage.getItem('crit-viewed-hunks-' + viewedIdentityHash()) || '{}');
+      files.forEach(function(file) {
+        if (Array.isArray(data[file.path])) file.viewedHunks = data[file.path];
+        reconcileStoryViewed(file);
+      });
+    } catch {}
   }
 
   function toggleViewed(filePath) {
     const file = getFileByPath(filePath);
     if (!file) return;
     file.viewed = !file.viewed;
+    delete file.viewedHunks;
     saveViewedState();
     updateViewedCount();
     updateTreeViewedState();
@@ -7228,6 +7269,7 @@
             viewMode: files[pi].viewMode,
             collapsed: files[pi].collapsed,
             viewed: files[pi].viewed,
+            viewedHunks: files[pi].viewedHunks,
             fileHash: files[pi].fileHash,
           };
         }
@@ -7264,6 +7306,8 @@
             // Lazy files must stay collapsed — they have no content to render
             if (!files[fi].lazy && !contentChanged) files[fi].collapsed = prev.collapsed;
             if (prev.viewed && !contentChanged) files[fi].viewed = true;
+            files[fi].viewedHunks = prev.viewedHunks;
+            reconcileStoryViewed(files[fi]);
           }
         }
 
@@ -10133,18 +10177,32 @@
   }
 
   // ----- Story progress -----
-  // Story mode uses the same file.viewed state and localStorage key as the
-  // regular diff. A file marked viewed in a chapter is viewed everywhere.
-  function isStoryFileViewed(filePath) {
+  function isStoryFileViewed(filePath, oldStarts, pageId) {
     const file = getFileByPath(filePath);
-    return !!(file && file.viewed);
+    if (!file || file.lazy) return !!(file && file.viewed);
+    const built = cloneFileForHunks(filePath, oldStarts, pageId);
+    return !!(built && areHunksViewed(file, built.clone.diffHunks));
+  }
+
+  function setStoryFileViewed(filePath, oldStarts, pageId, viewed) {
+    const file = getFileByPath(filePath);
+    if (!file || file.lazy) return;
+    const built = cloneFileForHunks(filePath, oldStarts, pageId);
+    if (!built) return;
+    const keys = new Set(file.viewedHunks || (file.viewed ? viewedHunkKeys(file.diffHunks) : []));
+    viewedHunkKeys(built.clone.diffHunks).forEach(function(key) {
+      if (viewed) keys.add(key);
+      else keys.delete(key);
+    });
+    file.viewedHunks = Array.from(keys);
+    reconcileStoryViewed(file);
   }
 
   // Progress for a page: {done, total} over its file groups.
   function storyPageProgress(page) {
     const groupFiles = Array.from(page.refsByFile.keys());
     let done = 0;
-    groupFiles.forEach(function (fp) { if (isStoryFileViewed(fp)) done++; });
+    groupFiles.forEach(function (fp) { if (isStoryFileViewed(fp, page.refsByFile.get(fp), storyPageId(page))) done++; });
     return { done: done, total: groupFiles.length };
   }
 
@@ -10203,7 +10261,7 @@
     clone.previousLineBlocks = file.previousLineBlocks;
     clone.tocItems = file.tocItems;
     clone.collapsed = file.collapsed;
-    clone.viewed = file.viewed;
+    clone.viewed = areHunksViewed(file, clone.diffHunks);
     clone.additions = file.additions;
     clone.deletions = file.deletions;
     clone.lazy = file.lazy;
@@ -10239,6 +10297,9 @@
       file.tocItems = loaded.tocItems;
       file.fileHash = loaded.fileHash;
       file.lazy = false;
+      reconcileStoryViewed(file);
+      updateViewedCount();
+      updateTreeViewedState();
       file._lazyLoading = false;
       delete file._storyLazyPromise;
       // Drop clones built against the empty lazy placeholder.
@@ -10297,6 +10358,7 @@
       // Force diff view for the group body regardless of markdown viewMode.
       viewMode: 'diff',
     });
+    clone.viewed = areHunksViewed(file, copiedHunks);
     storyExpandedFileCache.set(key, { fileHash: file.fileHash, clone: clone, total: expandedHunks.length });
     return { clone: clone, total: expandedHunks.length, shown: copiedHunks.length };
   }
@@ -10654,7 +10716,7 @@
     section.className = 'file-section crit-story-file-group';
     section.id = 'story-file-section-' + pid + '-' + filePath;
     section.dataset.storyFile = filePath;
-    if (file && file.viewed) section.classList.add('viewed');
+    if (isStoryFileViewed(filePath, oldStarts, pid)) section.classList.add('viewed');
     if (!file || !file.collapsed) section.open = true;
 
     const header = document.createElement('summary');
@@ -10750,15 +10812,20 @@
     const viewedLabel = document.createElement('label');
     viewedLabel.className = 'file-header-viewed';
     viewedLabel.title = shortcutTitle('Viewed', 'toggle_viewed');
-    viewedLabel.innerHTML = '<input type="checkbox"' + (file && file.viewed ? ' checked' : '') + '><span>Viewed</span>';
+    viewedLabel.innerHTML = '<input type="checkbox"' + (isStoryFileViewed(filePath, oldStarts, pid) ? ' checked' : '') + '><span>Viewed</span>';
     viewedLabel.addEventListener('click', function(e) { e.stopPropagation(); });
+    viewedLabel.querySelector('input').disabled = !!(file && file.lazy);
     viewedLabel.querySelector('input').addEventListener('change', function () {
-      toggleViewed(filePath);
-      if (file && file.viewed && section.open) {
+      const viewed = this.checked;
+      setStoryFileViewed(filePath, oldStarts, pid, viewed);
+      saveViewedState();
+      updateViewedCount();
+      updateTreeViewedState();
+      if (viewed && section.open) {
         revealStorySectionTop(section);
         section.open = false;
       }
-      section.classList.toggle('viewed', !!(file && file.viewed));
+      section.classList.toggle('viewed', viewed);
       renderStoryRail();
       updateStoryMarkButton(page);
     });
@@ -10848,12 +10915,14 @@
     return true;
   }
 
-  function markPageViewed(page, viewed) {
-    page.refsByFile.forEach(function (_starts, filePath) {
-      const file = getFileByPath(filePath);
-      if (!file || file.viewed === viewed) return;
-      file.viewed = viewed;
-      if (viewed) file.collapsed = true;
+  async function markPageViewed(page, viewed) {
+    try {
+      await Promise.all(Array.from(page.refsByFile.keys()).map(function(filePath) {
+        return ensureStoryLazyFile(getFileByPath(filePath));
+      }));
+    } catch { return; }
+    page.refsByFile.forEach(function (starts, filePath) {
+      setStoryFileViewed(filePath, starts, storyPageId(page), viewed);
     });
     saveViewedState();
     updateViewedCount();

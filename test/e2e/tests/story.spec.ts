@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
-  clearAllComments, loadPage, goSection, addComment, diffLine, diffLineNumber, hoverLine, revealFile,
+  clearAllComments, loadPage, fileHeader, goSection, addComment, diffLine, diffLineNumber, hoverLine, revealFile,
   submitFileLevelComment, expectPaintedQuote, selectInLineAndPressC, readFixtureState, roundComplete,
 } from './helpers';
 
@@ -434,6 +434,87 @@ test.describe('Story mode', () => {
     await expect(page.locator('.loading')).toBeHidden({ timeout: 10_000 });
     await expect(storyView(page, 'ch1')).toBeVisible();
     await expect(storyView(page, 'ch1').locator('.crit-story-file-group[data-story-file="routes.go"]')).toHaveClass(/viewed/);
+  });
+
+  test('Viewed tracks chapter hunks independently and derives whole-file progress', async ({ page, request }) => {
+    const routesPath = path.join(fixtureDir, 'routes.go');
+    const original = fs.readFileSync(routesPath, 'utf8');
+    try {
+      fs.writeFileSync(routesPath, original.replace(
+        'func handleCategories(w http.ResponseWriter, r *http.Request) {\n\tw.WriteHeader(http.StatusOK)',
+        'func handleCategories(w http.ResponseWriter, r *http.Request) {\n\tw.WriteHeader(http.StatusAccepted)'));
+      await roundComplete(request);
+      await expect.poll(async () => {
+        const diff = await (await request.get('/api/file/diff?path=routes.go')).json();
+        return diff.hunks.length;
+      }).toBe(3);
+      const { hunks } = await (await request.get('/api/file/diff?path=routes.go')).json();
+      await postStory(request, {
+        ...STORY,
+        chapters: STORY.chapters.map((chapter, i) => ({
+          ...chapter,
+          hunk_refs: (i === 0 ? hunks.slice(0, 2) : hunks.slice(2)).map((h: { OldStart: number }) => ({
+            file_path: 'routes.go', old_start: h.OldStart,
+          })),
+        })),
+      });
+      await loadPage(page);
+      const group = (id: string) => storyView(page, id).locator('[data-story-file="routes.go"]');
+      const tree = page.locator('.tree-file[data-tree-path="routes.go"]');
+      await tocItem(page, 'ch1').click();
+      await group('ch1').locator('.file-header-viewed').click();
+      await expect(group('ch1')).toHaveClass(/viewed/);
+      await expect(railRow(page, 'ch1').locator('.crit-story-status')).toHaveClass(/done/);
+      await expect(railRow(page, 'ch2').locator('.crit-story-status')).not.toHaveClass(/done|partial/);
+      await expect(page.locator('#viewedCount')).toContainText('0 /');
+      await expect(tree.locator('.tree-viewed-check')).toHaveCount(0);
+
+      await page.reload();
+      await expect(group('ch1')).toHaveClass(/viewed/);
+      await railRow(page, 'ch2').click();
+      await expect(group('ch2').locator('input[type="checkbox"]')).not.toBeChecked();
+      await group('ch2').locator('.file-header-viewed').click();
+      await expect(page.locator('#viewedCount')).toContainText('1 /');
+      await expect(tree).toHaveClass(/viewed/);
+      await expect(tree.locator('.tree-viewed-check')).toHaveCount(1);
+
+      // The flat checkbox still clears or marks the whole file.
+      await page.locator('#storyViewToggle [data-story-view="diff"]').click();
+      await revealFile(page, 'routes.go');
+      const flat = fileHeader(page, 'routes.go').locator('.file-header-viewed input');
+      await expect(flat).toBeChecked();
+      await flat.click();
+      await flat.click();
+      await page.locator('#storyViewToggle [data-story-view="story"]').click();
+      await railRow(page, 'ch1').click();
+      await expect(group('ch1')).toHaveClass(/viewed/);
+      await group('ch1').locator('.file-header-viewed').click();
+      await expect(page.locator('#viewedCount')).toContainText('0 /');
+      await railRow(page, 'ch2').click();
+      await expect(group('ch2')).toHaveClass(/viewed/);
+      await page.reload();
+      await expect(group('ch2')).toHaveClass(/viewed/);
+      await railRow(page, 'ch1').click();
+      await expect(group('ch1').locator('input[type="checkbox"]')).not.toBeChecked();
+
+      await storyView(page, 'ch1').locator('.crit-story-chapter__mark').click();
+      await expect(page.locator('#viewedCount')).toContainText('1 /');
+      fs.writeFileSync(routesPath, fs.readFileSync(routesPath, 'utf8')
+        .replace('http.StatusAccepted', 'http.StatusCreated'));
+      await roundComplete(request);
+      await expect(group('ch1')).not.toHaveClass(/viewed/);
+      await expect(page.locator('#viewedCount')).toContainText('0 /');
+      await railRow(page, 'ch2').click();
+      await expect(group('ch2')).toHaveClass(/viewed/);
+      await page.reload();
+      await expect(group('ch2')).toHaveClass(/viewed/);
+      await railRow(page, 'ch1').click();
+      await expect(group('ch1')).not.toHaveClass(/viewed/);
+    } finally {
+      await clearStory(request);
+      fs.writeFileSync(routesPath, original);
+      await roundComplete(request);
+    }
   });
 
   test('marking every file in a chapter viewed updates the chapter mark button in place', async ({ page, request }) => {

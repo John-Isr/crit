@@ -33,6 +33,9 @@ func TestSyncCommentsFromDisk_ClearsPendingWrite(t *testing.T) {
 	}
 	// Mirrors share flow: scheduling a debounced write blocks mergeExternalCritJSON.
 	sess.SetSharedURLAndToken("https://crit.md/r/tok", "del")
+	// Keep pendingWrite set, but stop the timer before the external write so
+	// a delayed save cannot overwrite the merged comment.
+	sess.QuiesceForTest()
 	if sess.PendingWriteForTest() != true {
 		t.Fatal("expected pendingWrite after SetSharedURLAndToken")
 	}
@@ -45,6 +48,9 @@ func TestSyncCommentsFromDisk_ClearsPendingWrite(t *testing.T) {
 
 	if !sess.SyncCommentsFromDisk() {
 		t.Fatal("SyncCommentsFromDisk returned false with pendingWrite set")
+	}
+	if sess.PendingWriteForTest() {
+		t.Fatal("expected pendingWrite cleared after sync")
 	}
 	if len(sess.GetComments("plan.md")) != 1 {
 		t.Fatalf("want 1 comment, got %d", len(sess.GetComments("plan.md")))

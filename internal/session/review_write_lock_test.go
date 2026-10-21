@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -53,7 +54,7 @@ func TestWithReviewWriteLockCannotCreateFolder(t *testing.T) {
 		return nil
 	})
 	var pathErr *os.PathError
-	if !errors.As(err, &pathErr) || pathErr.Op != "mkdir" || !os.IsPermission(err) {
+	if !errors.As(err, &pathErr) || pathErr.Op != "mkdir" || !errors.Is(err, fs.ErrPermission) {
 		t.Fatalf("expected mkdir permission error, got %v", err)
 	}
 }

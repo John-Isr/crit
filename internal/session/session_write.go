@@ -320,9 +320,17 @@ func (s *Session) writeFilesErr() error {
 		return nil
 	}
 
-	// Preserve the no-op for an empty session without creating a review folder.
-	if _, err := os.Stat(critPath); os.IsNotExist(err) && critJSONIsEmpty(buildCritJSON(s.snapshotForWrite(critPath))) {
+	// Check before taking the lock: the lock recreates the review folder.
+	if s.handleExternalDeletion(critPath) {
 		return nil
+	}
+	// Preserve the no-op for an empty session without creating a review folder.
+	if _, err := os.Stat(critPath); os.IsNotExist(err) {
+		snap := s.snapshotForWrite(critPath)
+		if critJSONIsEmpty(buildCritJSON(snap)) {
+			s.markEmptyWritten(snap)
+			return nil
+		}
 	}
 	return WithReviewWriteLock(critPath, func() error {
 		return s.writeReviewFile(critPath)
@@ -347,13 +355,7 @@ func (s *Session) writeReviewFile(critPath string) error {
 		if err := os.Remove(paths.Review); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("removing empty review file: %w", err)
 		}
-		s.mu.Lock()
-		s.lastCritJSONMtime = time.Time{}
-		s.pendingWrite = false
-		s.clearWrittenDeletedCommentIDs(snap.deletedCommentIDs)
-		s.pendingRemoteDeletes = nil
-		s.lastLoadedPendingDeletes = nil
-		s.mu.Unlock()
+		s.markEmptyWritten(snap)
 		return nil
 	}
 
@@ -382,6 +384,18 @@ func (s *Session) writeReviewFile(critPath string) error {
 		s.mu.Unlock()
 	}
 	return nil
+}
+
+// markEmptyWritten records that an empty snapshot is on disk (no review.json),
+// so the watcher stops treating the session as having a pending write.
+func (s *Session) markEmptyWritten(snap writeFilesSnapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastCritJSONMtime = time.Time{}
+	s.pendingWrite = false
+	s.clearWrittenDeletedCommentIDs(snap.deletedCommentIDs)
+	s.pendingRemoteDeletes = nil
+	s.lastLoadedPendingDeletes = nil
 }
 
 // clearWrittenDeletedCommentIDs acknowledges only tombstones included in a

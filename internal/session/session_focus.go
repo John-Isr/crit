@@ -245,7 +245,7 @@ func (s *Session) SetFocus(f Focus) error {
 
 	// Hold writeMu across the rest of SetFocus to serialize with the
 	// debounce-timer callback in scheduleWrite. Without this, a timer that
-	// fires after our WriteFiles() flush below — but before
+	// fires after our flush below — but before
 	// persistActiveDiffScope — would race the swap: it would snapshot the
 	// new Focus's (empty) Files alongside the OLD ActiveDiffScope on disk,
 	// producing a torn intermediate state where comments authored under
@@ -254,7 +254,7 @@ func (s *Session) SetFocus(f Focus) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	// Cancel any pending debounce timer outright. WriteFiles below flushes
+	// Cancel any pending debounce timer outright. The flush below writes
 	// in-memory state synchronously, so a deferred fire would write nothing
 	// new — but stopping it removes the chance that it sneaks in between
 	// our two locked critical sections (the swap and persistActiveDiffScope).
@@ -264,10 +264,10 @@ func (s *Session) SetFocus(f Focus) error {
 	}
 	s.mu.Unlock()
 
-	// Flush any pending debounced WriteFiles BEFORE we replace s.Files.
+	// Flush any pending debounced write BEFORE we replace s.Files.
 	// Without this, recent in-memory comments (authored within the last
 	// 200ms) live only in s.Files and would be lost when buildFilesForFocus
-	// returns a fresh slice with empty Comments. WriteFiles is idempotent
+	// returns a fresh slice with empty Comments. writeFilesErr is idempotent
 	// when there's nothing pending.
 	_ = s.writeFilesErr()
 
@@ -311,7 +311,7 @@ func (s *Session) SetFocus(f Focus) error {
 	s.mu.Unlock()
 
 	if err := s.persistActiveDiffScope(string(f.DiffScope)); err != nil {
-		// Roll back in-memory state. The WriteFiles() flush at the top of
+		// Roll back in-memory state. The flush at the top of
 		// SetFocus persisted the pre-swap state to disk; loadCritJSON only
 		// reads, and persistActiveDiffScope failed before mutating the file —
 		// so disk still reflects the old focus and rollback is complete.

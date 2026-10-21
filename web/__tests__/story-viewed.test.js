@@ -6,11 +6,12 @@ const path = require('node:path');
 const app = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
 const functions = ['storyRawHunks', 'viewedHunkKeys', 'areHunksViewed', 'reconcileStoryViewed']
   .map(name => app.match(new RegExp('  function ' + name + '\\([\\s\\S]*?\\n  }'))[0]).join('\n');
-const { viewedHunkKeys, areHunksViewed, reconcileStoryViewed } = new Function(`
+const { viewedHunkKeys, areHunksViewed, reconcileStoryViewed, setDiffCommit } = new Function(`
   const storyHidden = false, session = { story: {} };
+  let diffCommit = '';
   function storyHasContent() { return true; }
   ${functions}
-  return { viewedHunkKeys, areHunksViewed, reconcileStoryViewed };
+  return { viewedHunkKeys, areHunksViewed, reconcileStoryViewed, setDiffCommit: function(c) { diffCommit = c; } };
 `)();
 
 function hunk(start, content) {
@@ -61,4 +62,29 @@ test('legacy whole-file flags cover all hunks; partial state stays pending while
   reconcileStoryViewed(file);
   assert.deepEqual(file.viewedHunks, viewedHunkKeys(raw));
   assert.equal(file.viewed, true);
+});
+
+test('files without hunks (renames, binaries, failed diff loads) keep their file flag', () => {
+  const file = { viewed: true, diffHunks: [] };
+  reconcileStoryViewed(file);
+  assert.equal(file.viewed, true);
+  assert.equal(file.viewedHunks, undefined);
+
+  const raw = [hunk(1, 'first')];
+  const failed = { viewed: true, diffHunks: [], viewedHunks: viewedHunkKeys(raw) };
+  reconcileStoryViewed(failed);
+  assert.equal(failed.viewed, true);
+});
+
+test('a commit-scoped diff does not trim saved hunk keys', () => {
+  const raw = [hunk(1, 'first'), hunk(30, 'second')];
+  const file = { viewed: false, diffHunks: [raw[0]], viewedHunks: viewedHunkKeys([raw[1]]) };
+  setDiffCommit('abc123');
+  try {
+    reconcileStoryViewed(file);
+  } finally {
+    setDiffCommit('');
+  }
+  assert.deepEqual(file.viewedHunks, viewedHunkKeys([raw[1]]));
+  assert.equal(file.viewed, false);
 });

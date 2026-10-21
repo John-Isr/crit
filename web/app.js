@@ -869,8 +869,11 @@
 
   function reconcileStoryViewed(file) {
     // Only the full, unfiltered Story diff can determine whole-file completion.
-    if (file.lazy || storyHidden || !storyHasContent(session && session.story)) return;
+    // A commit pin scopes file.diffHunks to that commit, which would drop keys.
+    if (file.lazy || storyHidden || diffCommit || !storyHasContent(session && session.story)) return;
     const keys = viewedHunkKeys(file.diffHunks);
+    // Renames, binaries and failed diff loads have no hunks: the file flag decides.
+    if (!keys.length) { delete file.viewedHunks; return; }
     if (!file.viewedHunks && file.viewed) file.viewedHunks = keys;
     if (!file.viewedHunks) return;
     file.viewedHunks = file.viewedHunks.filter(function(key) { return keys.includes(key); });
@@ -10198,12 +10201,27 @@
     reconcileStoryViewed(file);
   }
 
-  // Progress for a page: {done, total} over its file groups.
+  // A group whose hunks are no longer in the diff (stale story) has nothing
+  // to mark. Lazy files count: their hunks arrive on load.
+  function storyGroupMarkable(filePath, oldStarts, pageId) {
+    const file = getFileByPath(filePath);
+    if (!file) return false;
+    if (file.lazy) return true;
+    const built = cloneFileForHunks(filePath, oldStarts, pageId);
+    return !!(built && built.shown);
+  }
+
+  // Progress for a page: {done, total} over its file groups that have hunks.
   function storyPageProgress(page) {
-    const groupFiles = Array.from(page.refsByFile.keys());
+    const pid = storyPageId(page);
     let done = 0;
-    groupFiles.forEach(function (fp) { if (isStoryFileViewed(fp, page.refsByFile.get(fp), storyPageId(page))) done++; });
-    return { done: done, total: groupFiles.length };
+    let total = 0;
+    page.refsByFile.forEach(function (starts, fp) {
+      if (!storyGroupMarkable(fp, starts, pid)) return;
+      total++;
+      if (isStoryFileViewed(fp, starts, pid)) done++;
+    });
+    return { done: done, total: total };
   }
 
   // Keep the chapter mark button in sync when per-file Viewed state changes.
@@ -10404,16 +10422,16 @@
         sub = 'Why this change exists';
       } else if (page.kind === 'support') {
         indexLabel = 'S';
-        const prog = storyPageProgress(page);
+        const nf = page.refsByFile.size;
         name = escapeHtml(supportPageLabel(page));
-        sub = prog.total + ' file' + (prog.total === 1 ? '' : 's');
+        sub = nf + ' file' + (nf === 1 ? '' : 's');
         statusHtml = railStatusHtml(page);
       } else {
         indexLabel = String(page.idx + 1);
         name = escapeHtml(page.title);
-        const prog = storyPageProgress(page);
+        const nf = page.refsByFile.size;
         const nh = countHunksForPage(page);
-        sub = prog.total + ' file' + (prog.total === 1 ? '' : 's') + ' · ' + nh + ' hunk' + (nh === 1 ? '' : 's');
+        sub = nf + ' file' + (nf === 1 ? '' : 's') + ' · ' + nh + ' hunk' + (nh === 1 ? '' : 's');
         statusHtml = railStatusHtml(page);
       }
       row.innerHTML =
@@ -10528,7 +10546,6 @@
       item.className = 'crit-story-toc__item' + (page.kind === 'support' ? ' support' : '');
       const pid = storyPageId(page);
       item.dataset.storyTarget = pid;
-      const prog = storyPageProgress(page);
       const nh = countHunksForPage(page);
       const indexLabel = page.kind === 'support' ? 'S' : String(page.idx + 1);
       const title = page.kind === 'support' ? supportPageLabel(page) : page.title;
@@ -10543,7 +10560,7 @@
         '</span>' +
         '<span class="crit-story-toc__meta">' +
           railStatusHtml(page) +
-          '<span>' + prog.total + 'f · ' + nh + 'h</span>' +
+          '<span>' + page.refsByFile.size + 'f · ' + nh + 'h</span>' +
           '<span class="crit-story-toc__go">→</span>' +
         '</span>';
       item.addEventListener('click', function () { showStory(pid); });
@@ -10814,10 +10831,11 @@
     viewedLabel.title = shortcutTitle('Viewed', 'toggle_viewed');
     viewedLabel.innerHTML = '<input type="checkbox"' + (isStoryFileViewed(filePath, oldStarts, pid) ? ' checked' : '') + '><span>Viewed</span>';
     viewedLabel.addEventListener('click', function(e) { e.stopPropagation(); });
-    viewedLabel.querySelector('input').disabled = !!(file && file.lazy);
+    viewedLabel.querySelector('input').disabled = !!(file && file.lazy) || !storyGroupMarkable(filePath, oldStarts, pid);
     viewedLabel.querySelector('input').addEventListener('change', function () {
-      const viewed = this.checked;
-      setStoryFileViewed(filePath, oldStarts, pid, viewed);
+      setStoryFileViewed(filePath, oldStarts, pid, this.checked);
+      const viewed = isStoryFileViewed(filePath, oldStarts, pid);
+      this.checked = viewed;
       saveViewedState();
       updateViewedCount();
       updateTreeViewedState();
@@ -10916,13 +10934,14 @@
   }
 
   async function markPageViewed(page, viewed) {
-    try {
-      await Promise.all(Array.from(page.refsByFile.keys()).map(function(filePath) {
-        return ensureStoryLazyFile(getFileByPath(filePath));
-      }));
-    } catch { return; }
+    // A file that fails to load stays lazy, and setStoryFileViewed skips it.
+    await Promise.allSettled(Array.from(page.refsByFile.keys()).map(function(filePath) {
+      return ensureStoryLazyFile(getFileByPath(filePath));
+    }));
     page.refsByFile.forEach(function (starts, filePath) {
       setStoryFileViewed(filePath, starts, storyPageId(page), viewed);
+      const file = getFileByPath(filePath);
+      if (viewed && file && !file.lazy) file.collapsed = true;
     });
     saveViewedState();
     updateViewedCount();

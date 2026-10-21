@@ -544,6 +544,49 @@ test.describe('Story mode', () => {
     await expect(group).not.toHaveClass(/viewed/);
   });
 
+  test('Mark chapter viewed collapses every group in the chapter', async ({ page, request }) => {
+    await postStory(request);
+    await loadPage(page);
+
+    await tocItem(page, 'ch2').scrollIntoViewIfNeeded();
+    await tocItem(page, 'ch2').click();
+    const view = storyView(page, 'ch2');
+    const groups = view.locator('.crit-story-file-group');
+    await expect(groups).toHaveCount(2);
+    await expect(view.locator('.crit-story-file-group[open]')).toHaveCount(2);
+
+    const markBtn = view.locator('.crit-story-chapter__mark-row .crit-story-chapter__mark');
+    await markBtn.scrollIntoViewIfNeeded();
+    await markBtn.click();
+    await expect(markBtn).toHaveText('Chapter viewed');
+    await expect(view.locator('.crit-story-file-group.viewed')).toHaveCount(2);
+    await expect(view.locator('.crit-story-file-group[open]')).toHaveCount(0);
+  });
+
+  test('a group whose hunks left the diff cannot be marked and does not block chapter progress', async ({ page, request }) => {
+    const story = structuredClone(STORY);
+    story.chapters[0].hunk_refs.push({ file_path: 'server.go', old_start: 9000 });
+    await postStory(request, story);
+    await loadPage(page);
+
+    await tocItem(page, 'ch1').scrollIntoViewIfNeeded();
+    await tocItem(page, 'ch1').click();
+    const view = storyView(page, 'ch1');
+    const stale = view.locator('.crit-story-file-group[data-story-file="server.go"]');
+    await expect(stale.locator('.file-header-viewed input')).toBeDisabled();
+
+    const group = view.locator('.crit-story-file-group[data-story-file="routes.go"]');
+    await group.locator('.file-header-viewed').scrollIntoViewIfNeeded();
+    await group.locator('.file-header-viewed').click();
+    const markBtn = view.locator('.crit-story-chapter__mark-row .crit-story-chapter__mark');
+    await expect(markBtn).toHaveText('Chapter viewed');
+
+    await markBtn.scrollIntoViewIfNeeded();
+    await markBtn.click();
+    await expect(markBtn).toHaveText('Mark chapter viewed');
+    await expect(group).not.toHaveClass(/viewed/);
+  });
+
   test('a and o act on the story file group under the mouse, else the one filling the pane', async ({ page, request }) => {
     await postStory(request);
     await loadPage(page);
